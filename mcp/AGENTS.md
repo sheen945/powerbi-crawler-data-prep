@@ -1,0 +1,123 @@
+# Power BI MCP Server - Agent Guide
+
+This file orients AI agents (Claude, Copilot, etc.) working through this MCP server.
+Read it before driving Power BI tasks.
+
+## What this server does
+
+A Model Context Protocol server that lets an agent inspect, query, validate, optimize,
+govern, and safely refactor Power BI semantic models and reports. It connects to:
+
+- **Power BI Desktop** (local Analysis Services) - read + write, RLS testing
+- **Power BI Service** (XMLA + REST) - cloud datasets
+- **PBIP / TMDL / PBIR files** (offline) - safe, report-aware refactoring AND authoring
+  (measures, date tables, calculation groups, hierarchies, report pages/visuals)
+- **The running Desktop app** (Desktop Bridge, preview) - open-file state, hot-reload
+  from disk, page screenshots
+
+It also runs fully cross-platform for the offline + analysis subset (PBIP editing,
+Best Practice Analyzer, AI-readiness, security) even without ADOMD/.NET.
+
+## Golden rules
+
+1. **Renaming: always use the PBIP tools, never the TOM `batch_rename_*` tools.**
+   TOM renames only touch the model and break report visuals. `pbip_rename_tables`
+   / `pbip_rename_columns` / `pbip_rename_measures` update the model AND the report
+   layer (visual.json, cultures, diagram, hierarchy levels, sortByColumn). After any
+   offline PBIP edit, hot-reload the open Desktop with `bridge_reload` (check
+   `bridge_status` first; never reload over unsaved changes) instead of asking the
+   user to close and reopen.
+2. **Validate DAX before you commit it.** Call `validate_dax` on any new/edited
+   measure expression. `create_measure` and `batch_update_measures` validate
+   automatically (pass `skip_validation: true` only if you must).
+3. **Batch model edits inside a transaction.** `tom_begin_transaction` ->
+   edits -> `tom_commit_transaction` (or `tom_rollback_transaction`). Edits are
+   atomic and reversible.
+4. **Check impact before destructive changes.** `scan_measure_dependencies` (model
+   dependents) and `pbip_scan_broken_refs` (report references) before delete/rename.
+5. **Respect the safety hints.** Every tool is annotated (`readOnlyHint`,
+   `destructiveHint`). Confirm destructive operations with the user.
+
+## Recommended workflows
+
+- **Author a measure:** `validate_dax` (draft) -> `create_measure` (auto-validates)
+  -> `analyze_query_performance` to sanity-check.
+- **Optimize a model:** `run_bpa` -> `audit_ai_readiness` -> `analyze_model_storage`
+  -> remediate top issues -> re-run.
+- **Improve DAX:** `dax_lint` (whole model or one measure) -> `dax_suggest_rewrite` ->
+  apply the rewrite with `create_measure`/`batch_update_measures` (which `validate_dax` first).
+- **Bulk-create measures:** `generate_measure_suite` (target='none' to preview) -> review ->
+  re-run with target='pbip' (offline) or target='live' / `batch_create_measures` (validated batch).
+- **Model a warehouse:** `audit_star_schema` -> `pbip_create_date_table` (if no date dim) ->
+  `create_relationship` fact-to-date -> `pbip_add_calculation_group` (time_intelligence preset)
+  or `generate_measure_suite` -> `pbip_add_hierarchy` -> `scan_referential_integrity` to verify.
+- **Safe rename:** `scan_measure_dependencies` + `pbip_scan_broken_refs` ->
+  `pbip_load_project` -> `pbip_rename_*` -> `pbip_validate`.
+- **Author a report (PBIR, preview):** `pbip_load_project` -> `pbir_add_page` ->
+  `pbir_add_visual` (bind fields by role) / `pbir_bind_fields` -> `pbir_validate_report`.
+  Pass fields as `Table.Field`; the server picks measure vs aggregated-column from the model,
+  so prefer naming explicit measures for value wells. Close Power BI Desktop before editing.
+- **Edit-and-verify a report (Desktop Bridge):** `bridge_status` (open file, unsaved state,
+  pages) -> edit offline with `pbir_*`/`pbip_*` -> `bridge_reload` (hot-reload, no reopen) ->
+  `bridge_screenshot` -> Read the PNG to visually verify. Never reload over unsaved changes.
+- **Ground yourself first:** read the `powerbi://desktop/schema` resource (or
+  `get_model_info`) before generating DAX, so you use real table/column names.
+
+## Prompts (guided workflows)
+
+`optimize_measure`, `explain_measure`, `audit_model`, `document_model`,
+`plan_safe_rename`, `pre_deploy_review` - invoke these for ready-made, tool-orchestrated
+playbooks.
+
+## Resources
+
+`powerbi://desktop/schema`, `.../measures`, `.../bpa`, `.../ai-readiness`, the template
+`powerbi://cloud/{workspace}/{dataset}/schema`, and the reference resources
+`powerbi://reference/bpa-rules` and `powerbi://reference/refresh-errors` expose model
+context as read-only resources (no tool call needed).
+
+## DAX patterns the agent should prefer
+
+- Use `DIVIDE(n, d)` instead of `n / d` (safe divide-by-zero).
+- Use `SUMMARIZECOLUMNS(...)` instead of `SUMMARIZE` + `ADDCOLUMNS`.
+- Use variables (`VAR`/`RETURN`) to avoid recomputing sub-expressions.
+- Filter with boolean predicates inside `CALCULATE` rather than wrapping whole
+  tables in `FILTER` when possible.
+- Always set a `FormatString` and a `Description` on measures (helps Copilot too).
+
+## Governance
+
+A security layer can mask/block PII and sensitive columns and audit every query
+(see `config/policies.yaml`, tools `security_status` / `security_audit_log`).
+Column policies are enforced on `execute_dax` / `desktop_execute_dax` results.
+
+## Positioning vs Microsoft's official Power BI MCP
+
+Microsoft's official **remote** server is best for cloud chat-with-data, and the
+official **local modeling** MCP for raw model authoring. This server is
+complementary and differentiates on: report-layer-aware safe renames (which the
+official local MCP explicitly cannot do), a governance/PII layer, RLS testing,
+and an offline PBIP-first workflow that needs no Fabric capacity.
+
+## LOCAL PATCHES on this machine (2026-10-01, Power BI Desktop 26.09)
+
+This checkout is **not vanilla** — three fixes were applied locally after real failure
+reproduction. An upstream upgrade/reinstall will lose them; re-apply from here.
+
+1. `src/desktop_bridge.py` — new `call_with_args()`; `get_state` / `capture_snapshot` /
+   `reload_file` now nest business params under `{"args": {...}}` (Desktop builds >= 26.07
+   declare `params.required = ["args"]` in `bridge.manifest`; the old flat form returns
+   `-32602 Request arguments are required`). Snapshot prefers `report.snapshot.capture/v2`
+   and falls back to v1.
+2. `src/powerbi_pbip_connector.py` — `_write_text()` now takes a process-wide `_WRITE_LOCK`
+   and uses a per-thread temp filename. Concurrent tool calls previously shared
+   `<name>.tmp` and failed with `WinError 32`, corrupting `Report/definition/pages/pages.json`
+   when two `pbir_add_page` calls raced.
+3. `src/powerbi_pbip_connector.py` — `create_backup()` writes to
+   `%TEMP%/powerbi-mcp-backups/` instead of the project's parent folder (no more
+   `*_backup_<timestamp>` folders cluttering the user's workspace).
+
+Regression check: `python <workspace>/_tools/验证MCP补丁.py` (4x150 concurrent writes,
+live bridge screenshot, backup path assertion).
+Still missing by design: there is **no local model refresh tool** — drive TOM instead
+(`Model.RequestRefresh(RefreshType.Full)` + `SaveChanges()`, DLLs in `adomd/`).

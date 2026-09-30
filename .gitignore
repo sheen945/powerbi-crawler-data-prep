@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 微软客户端库（自行获取，见 mcp/ADOMD-DLL-说明.md）
+adomd/
+**/adomd/
+
+# 本地运行产物
+logs/
+*.log
+.env
+localSettings.json
+**/.pbi/localSettings.json
+**/.pbi/cache.abf
+
+# 备份
+*_backup_*/
+**/powerbi-mcp-backups/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
