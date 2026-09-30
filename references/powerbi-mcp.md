@@ -5,7 +5,7 @@
 
 ## 0. 本机事实（别再去找别的方案）
 
-- 配置：`~/.workbuddy/mcp.json` → 服务名 `powerbi` → `%USERPROFILE%/WorkBuddy/tools/powerbi-mcp/src/server.py`
+- 配置：`~/.workbuddy/mcp.json` → 服务名 `powerbi` → `C:/Users/Administrator/WorkBuddy/tools/powerbi-mcp/src/server.py`
 - 建模库：`powerbi-mcp/adomd/`（`Microsoft.AnalysisServices.Tabular.dll` / `.AdomdClient.dll`），
   pythonnet 可直接加载，**这就是"MCP 没有的功能"的兜底通道**
 - 参考文档：同目录 `AGENTS.md`（作者写给 agent 的金规：改名走 pbip_*、DAX 先校验、批量改走事务）
@@ -49,7 +49,7 @@ MCP 没有任何"刷新本地模型"的工具，只能用它自带的建模库�
 
 ```python
 import sys, clr
-sys.path.append(r'%USERPROFILE%/WorkBuddy/tools/powerbi-mcp/adomd')
+sys.path.append(r'C:/Users/Administrator/WorkBuddy/tools/powerbi-mcp/adomd')
 clr.AddReference('Microsoft.AnalysisServices.Tabular')
 clr.AddReference('Microsoft.AnalysisServices.Core')
 clr.AddReference('Microsoft.AnalysisServices.AdomdClient')
@@ -74,7 +74,7 @@ db.Model.RequestRefresh(RefreshType.Full); db.Model.SaveChanges()
 
 ## 5. 本机补丁（3 处，2026-10-01 实测后打的）
 
-都在 `%USERPROFILE%/WorkBuddy/tools/powerbi-mcp/src/`，**MCP 服务重启后生效**（本次用直接调用模块验证）：
+都在 `C:/Users/Administrator/WorkBuddy/tools/powerbi-mcp/src/`，**MCP 服务重启后生效**（本次用直接调用模块验证）：
 
 1. **`desktop_bridge.py`**：新增 `call_with_args()`。26.07+ 的桥接在 manifest 里声明
    `params.required = ["args"]`，业务参数必须写成 `{"args": {...}}`；原来直接传 `{"pageId","scale"}` 会报
