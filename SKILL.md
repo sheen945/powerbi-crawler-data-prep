@@ -1,6 +1,6 @@
 ---
 name: powerbi-crawler-data-prep
-description: 把爬虫抓来的多源数据（JSON/CSV/Excel 混杂）清洗进本地 Power BI Desktop 的完整链路：M 清洗流 → 星型模型（事实/维度、关系、计算列、度量值）→ 可直接双击打开的 PBIP 项目与多页看板 → 交付后用本机 Power BI MCP 连活模型真机验证（刷新/行数/勾稽/截图）。覆盖三类入口、每日增量管道、爬虫特有清洗、M 与 TMDL 工程规范（UTF-8 无 BOM 铁律）、PBIR 可视化与 pbit 导出限制。触发场景：爬虫数据进 Power BI、多格式合并、每日/每比赛日增量刷新、篮球/比赛数据清洗、CC指数/伤病/首发可视化、星型模型/维度建模/度量值/计算列、要在 Power BI 里直接看到/帮我打开 Power BI、做成 pbip/Power BI 项目/模板/pbit、Power BI MCP、写 Power Query M 代码。
+description: 把爬虫抓来的多源数据（JSON/CSV/Excel 混杂）清洗进本地 Power BI Desktop 的完整链路：M 清洗流 → 星型模型（事实/维度、关系、计算列、度量值）→ 多页看板 → **最终交付 .pbit 模板**（2026-10 定规，PBIP 只是中间工程）→ 交付后用本机 Power BI MCP 连活模型真机验证（刷新/行数/勾稽/逐页截图）。覆盖三类入口、每日增量管道、爬虫特有清洗、M 与 TMDL 工程规范（UTF-8 无 BOM 铁律）、PBIR 可视化、PBIT 真实内部结构与 Desktop 导出自动化的能力边界。触发场景：爬虫数据进 Power BI、多格式合并、每日/每比赛日增量刷新、篮球/比赛数据清洗、CC指数/伤病/首发可视化、星型模型/维度建模/度量值/计算列、要在 Power BI 里直接看到/帮我打开 Power BI、做成 pbip/Power BI 项目/模板/pbit、导出 pbit、Power BI MCP、写 Power Query M 代码。
 license: GPL-3.0（方法论部分源自 data-goblin/power-bi-agentic-development，爬虫模式为原创补充）
 ---
 
@@ -83,16 +83,42 @@ license: GPL-3.0（方法论部分源自 data-goblin/power-bi-agentic-developmen
 4. **空值**：关键字段空值数量符合预期（爬虫缺数据是常态，但要心里有数）
 5. **行数**：去重后行数合理，新丢一天的文件后行数增量正确
 
-## 交付形态：给「能双击打开的项目」，不是一堆 M 文本
+## 交付形态：`.pbit`（唯一交付格式，2026-10-07 用户定规）
 
-用户说「要在 Power BI 里能看到」时，**M 脚本文件不算交付**。正确做法是产出一个 **PBIP 项目**（纯文本工程，双击即在 Desktop 里打开，参数/表/关系/管道全部预置）：
+**用户说的「清洗完的那个文件」= `.pbit` 模板。** PBIP 只是过程中的工程载体（纯文本、方便用 MCP 离线改模型和报表），最终**必须导出成 `.pbit` 交出去**。
 
-- 文件清单：`.pbip` + `<名>.SemanticModel/definition/*.tmdl` + `<名>.Report/{definition.pbir,report.json}`
-- 中间查询（不加载）写进 `expressions.tmdl`，表写进 `tables/*.tmdl`，列必须有 `sourceColumn`
-- `model.tmdl` 必须有 `ref table`；`.pbip` 必须有 `$schema` 且 artifacts 只放 report
-- ⛔ **全部文件必须 UTF-8 无 BOM**（TMDL 带 BOM 会让 Desktop 直接拒绝打开，报 `Only text with UTF8 encoding without BOM is supported`）
-- **交付前用 `pbi-tools convert <definition文件夹> <输出> Tmdl` 过一遍官方 TOM 解析器**（退出码 0 = TMDL 语法合法），产物覆盖回项目后**记得剥掉 BOM**
-- 完整模板、坑位清单、编码铁律、`.pbit` 走不通的替代方案 → `references/pbip-delivery.md`
+固定顺序（不要跳步、不要改序）：
+
+```
+① 生成 PBIP 工程 —— Python 生成器，列清单同时驱动 M 代码与 TMDL 列定义（列一多手写必错）
+② 离线校验 —— pbip_load_project → pbip_validate → pbir_validate_report（三者全绿才继续）
+③ 真机验证 —— 打开 Desktop → TOM 刷新 → DAX 验行数/勾稽（见 powerbi-mcp.md）
+④ 导出 PBIT —— 文件 → 导出 → Power BI 模板（**全流程可自动**，9 步配方见 `pbit-export.md` §3.2）
+⑤ 验收 —— 部件齐全 + 真机打开后弹出「以模板名命名的参数框」（这才是有效的铁证）
+⑥ 打包交付 —— 打**压缩包**（pbit + PBIP 工程 + 原始数据 + 截图 + 提示词 + 说明），**并在说明里写明需要的最低 Desktop 版本**
+   （只发一个 pbit 文件 = 对方打不开时无路可退。跨版本处置见 `pbit-export.md` §6）
+```
+
+⛔ **硬规则：不要自造 PBIT。** 已经两次撞墙（含按真实结构全量重做、补齐 `lineageTag`）——尸检结论见 `references/pbit-export.md` §2，别再花时间。
+
+- PBIP 侧要求（结构、TMDL 格式死线、UTF-8 无 BOM 铁律）→ `references/pbip-delivery.md`
+- PBIT 侧一切（真实内部结构、导出自动化、坐标标定）→ `references/pbit-export.md`
+
+## ⏱ 省时间清单：这些坑已经踩透，别再探索
+
+| 别再做 | 为什么 | 直接做什么 |
+| --- | --- | --- |
+| 自造 / 手拼 `.pbit` | 三次撞墙（含按真结构重做 + 补 lineageTag），Desktop 26.09 仍报「文件已损坏或版本无法识别」 | 走 Desktop「文件 → 导出 → Power BI 模板」 |
+| `pbi-tools compile → pbit` | 打包接口签名变了，`MissingMethodException`；且它要 PbixProj 目录不是 TMDL 目录 | 同上 |
+| 用 `mouse_event` 点 Desktop 的 File 后台面板 | 面板收不到旧 API 的合成输入，点了没反应 | 换 `SendInput`（`pbit-export.md` §4.1） |
+| 靠肉眼读截图估坐标 | Read 工具的渲染缩放比未知，必错（实测浪费最多时间的一条） | 暗像素扫描 + `EnumChildWindows` 算包围盒 |
+| 打开模型后调整 Desktop 窗口尺寸 | WebView 子窗口几何不跟着变，后面点击全乱 | 一开始定好尺寸，或全程用最大化 |
+| `netstat` 找 Desktop 的 AS 端口 | 沙箱里拿不到 LISTENING 行 | MCP `desktop_discover_instances` |
+| `python -c` 跑含 `\.\pipe\` 的桥接脚本 | bash 吃掉反斜杠 → 假报"管道不存在" | 写成 `.py` 文件再跑 |
+| 追求 Desktop 导出 100% 无人值守 | **已跑通**：导出全流程（含点「保存」）都能自动；只有**打开 pbit 后那个参数框**是 IE 控件填不进去 | 导出用 `pbit-export.md` §3.2 的 9 步配方；参数填写交给用户 1~2 次操作 |
+| 交付 pbit 时不写版本要求 | **对方十有八九打不开**（报「此文件与当前版本的 Power BI Desktop 不兼容」），然后回来找你返工。根因是文件太新，不是你做错了 | 交付说明里写明「需要的最低版本」+ 附一份**重建提示词**和**完整 PBIP 工程**（`pbit-export.md` §6）；对方有事还有退路 |
+| 试图产出「向下兼容」的 pbit | 兼容级别只能升不能降（官方 `irreversible`），报表又是新版 PBIR 2.0.0 格式，翻译回去=重画；本机只有新版无法验证 | 老实走 §6.4：让对方重建（首选）或升级 Desktop |
+| 只发一个 pbit 文件过去 | IM 传输可能截断，且对方缺数据、缺说明、缺退路 | 打**压缩包**：pbit + PBIP 工程 + 原始数据 + 截图 + 提示词 + 说明 |
 
 ## 交付后必须做：真机验证（本机 Power BI MCP）
 
@@ -103,7 +129,8 @@ license: GPL-3.0（方法论部分源自 data-goblin/power-bi-agentic-developmen
 3. 连活模型：`desktop_discover_instances` 拿端口 → `desktop_connect` → `desktop_list_tables/columns`
 4. 刷新：**MCP 没有刷新工具**，用脚本 `_tools/刷新并验证.py <端口>`（TOM `RequestRefresh(Full)` + `SaveChanges`）
 5. 验数：`desktop_execute_dax` 查行数与勾稽；`COUNTROWS` 返回 null = 从未刷新，不是模型错
-6. 截图：`bridge_status` → `bridge_screenshot`；桥接报「Host is not ready」= 窗口被最小化，先还原；桥接挂掉就用 `_tools/窗口截图3.py <pid>`（ctypes PrintWindow）
+6. 截图：**逐页**取证用 Desktop Bridge（`file.reload/v1` 热重载 + `report.snapshot.capture/v2` 按 pageId 截图，最干净）；桥接报「Host is not ready」= 窗口被最小化或有模态框，先还原；桥接挂掉就用 `_tools/窗口截图3.py <pid>`（ctypes PrintWindow）
+7. **导出 PBIT 后再验一次**：打开 pbit，用 Bridge `application.state.get/v1` 看 `currentFilePath` 必须指向这个 pbit（空 = 没真打开）→ 见 `pbit-export.md` §5
 
 > 本机 MCP 已打 3 个补丁（桥接 `args` 契约、并发写锁、备份落 temp），改动在 `tools/powerbi-mcp/src/`，升级会丢——细节见 `references/powerbi-mcp.md` §5。
 
@@ -117,12 +144,17 @@ license: GPL-3.0（方法论部分源自 data-goblin/power-bi-agentic-developmen
 
 ## 参考文件
 
-- `references/m-core.md` — M 语言核心规范完整版（命名、类型、反模式、调试法）
-- `references/sources-and-pipeline.md` — JSON/CSV/Excel 三套入口模板 + Folder.Files 每日增量管道完整代码
-- `references/crawler-cleaning-patterns.md` — 字段映射、名称归一、文本转数值、去重的完整代码模板
-- `references/star-schema-and-dax.md` — 星型模型与 DAX 规范：表角色划分、关系铁律、计算列 vs 度量值、度量值模板、看板排版约定
-- `references/pbip-delivery.md` — PBIP 工程怎么写：结构、各文件模板、编码铁律（无 BOM）、离线校验、PBIR 可视化、pbit 的真相
-- `references/powerbi-mcp.md` — Power BI MCP 使用手册：工具速查、真机验证链、刷新缺口、报表创作坑、本机 3 处补丁、脚本清单
+按「到哪一步了」查：
+
+| 阶段 | 看哪个 |
+| --- | --- |
+| **交付物 = .pbit**（真实内部结构、导出自动化边界、坐标标定、验收） | `references/pbit-export.md` ⭐ |
+| 中间产物 PBIP 怎么写（结构、模板、TMDL 格式死线、无 BOM、离线校验、PBIR 可视化） | `references/pbip-delivery.md` |
+| 真机验证（MCP 工具速查、验证链、刷新缺口、本机补丁、脚本清单） | `references/powerbi-mcp.md` |
+| M 语言规范（命名、类型、反模式、调试法） | `references/m-core.md` |
+| 三套入口模板 + Folder.Files 每日增量管道 | `references/sources-and-pipeline.md` |
+| 字段映射、名称归一、文本转数值、去重代码模板 | `references/crawler-cleaning-patterns.md` |
+| 星型模型与 DAX（关系铁律、计算列 vs 度量值、度量值模板、看板排版） | `references/star-schema-and-dax.md` |
 
 ## 署名
 

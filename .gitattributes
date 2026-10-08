@@ -1,0 +1,10 @@
+# 仓库内文本统一 LF，避免跨平台换行符噪音
+* text=auto eol=lf
+*.md   text
+*.py   text
+*.json text
+*.yaml text
+*.toml text
+*.txt  text
+*.png  binary
+*.dll  binary

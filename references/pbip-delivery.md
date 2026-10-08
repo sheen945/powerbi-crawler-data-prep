@@ -1,13 +1,15 @@
-# 交付形态：能双击打开的 Power BI 项目（PBIP）
+# PBIP 工程（中间产物）怎么写
 
-> 目标：不用让用户在 Power BI 里手动建查询，直接给他一个**双击就在 Power BI Desktop 里打开、点刷新就有数据**的产物。
+> 本文讲**过程产物 PBIP 工程**：它是纯文本，方便用 Python 生成、用 MCP 离线改模型和报表。
+> ⭐ **最终交付物是 `.pbit`**（2026-10 用户定规），导出方法、真实结构与自动化边界见 `pbit-export.md`。
 > 本文全部内容在 Windows + Power BI Desktop 26.09 实测跑通（2026-10）。
 
-## 为什么是 PBIP（Power BI 项目）而不是 .pbix / .pbit
+## 为什么先做 PBIP，再导出 PBIT
 
-- `.pbix` / `.pbit` **都是二进制 OPC 包，无法离线手写**；`pbi-tools compile` 生成时要用到 Desktop 自带的打包接口（见文末限制）。
-- `.pbip` 是 **100% 纯文本工程**：模型用 TMDL，报表用 report.json，全部可以用文本工具生成，Desktop 原生支持双击打开。
-- 想要单文件 `.pbix`：让用户在 Desktop 里「文件 → 另存为」即可（PBIP ↔ PBIX 可互相另存）。
+- `.pbix` / `.pbit` **都是二进制 OPC 包，无法离线手写**（试过两次，见 `pbit-export.md` §2）。
+- `.pbip` 是 **100% 纯文本工程**：模型用 TMDL，报表用 PBIR JSON，全部可以用文本工具生成，Desktop 原生支持双击打开。
+- 所以链路是：**文本生成 PBIP → 真机验证 → Desktop 自己导出成 `.pbit` 交付**。
+- 用户想要单文件可编辑版：在 Desktop 里「文件 → 另存为 `.pbix`」。
 
 ## 文件夹结构（实测可用）
 
@@ -27,7 +29,10 @@
 │           └── <表2>.tmdl
 └── <项目名>.Report/
     ├── definition.pbir
-    └── report.json                      ← legacy 报表格式，最小可用
+    └── definition/                       ← PBIR 增强格式（要加可视化就必用；legacy 单 report.json 与它互斥）
+        ├── report.json
+        ├── version.json
+        └── pages/                        ← 页面与视觉对象都放这里
 ```
 
 ## 各文件模板
@@ -87,34 +92,40 @@ model Model
 		legacyRedirects
 		returnErrorValuesAsNull
 
-	annotation __PBI_TimeIntelligenceEnabled = 0
-	annotation PBI_QueryOrder = ["表1","表2"]
-	ref table 表1
-	ref table 表2
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+annotation PBI_QueryOrder = ["表1","表2"]
+
+ref table 表1
+ref table 表2
 ```
+
+⛔ **`annotation` 和 `ref table` 必须顶格（第 0 列）**，只有属性行（`culture:` 等）缩进一个 tab。缩进一级会被当成上一行 `annotation` 的子对象 → `Parsing error type - InvalidLineType / Unexpected line type: ReferenceObject!`。顶格语句之间**留空行**。
 
 `expressions.tmdl`（参数 / 函数 / 不加载的中间查询）：
 
 ```tmdl
-expression '数据文件夹路径' = "D:\爬虫数据" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+expression 数据文件夹路径 = "D:\爬虫数据" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
 
-expression '清洗单CSV' =
+expression 清洗单CSV =
 		(Content as binary, 文件名 as text) =>
 		let
 		    ...
 		in
 		    结果
 
-expression '比赛宽表' =
+expression 比赛宽表 =
 		let
 		    ...
 		in
 		    去重
+
 	annotation PBI_ResultType = Table
 ```
 
+- **表达式名不加引号**（`expression 比赛宽表 =`）：中文标识符可直接解析，加 `'…'` 也能读但没必要。
 - **不加载到模型的中间查询**（Desktop 里「启用加载」不勾）在 PBIP 里就是 `expressions.tmdl` 的 shared expression，别的 partition 直接按名字引用它（如 `源 = 比赛宽表`）。
-- **多行 M 的缩进**：属性行（`= `）之后至少再缩进一级；要跟 `annotation` 同级会被吞进 M 文本里报语法错。
+- **多行 M 的缩进**：属性行（`= `）之后的 M 体要**深于**随后的 `annotation`（M 体 2 tab、annotation 1 tab），并且两者之间**留一个空行**最稳。反过来（M 体与 annotation 同级）会被吞进 M 文本报语法错。
 - 参数加 `IsParameterQueryRequired=true`，Desktop 打开时会弹框让用户确认路径 —— 模板交付正需要这个行为。
 
 `tables/<表名>.tmdl`：
@@ -146,15 +157,35 @@ table 比赛数据
 ```
 
 - 每个列都要 `sourceColumn` 绑定 **M 输出的列名**（不是显示名），名字对不上刷新就报错。
-- `dataType` 用 TOM 名称：`int64` / `double` / `string` / `dateTime` / `boolean`。
+- `dataType` 用 TOM 名称：`int64` / `double` / `string` / `dateTime` / `boolean`，**没有 `date`**（日期列写 `dateTime` + `formatString: Short Date`）。
 - 编号、ID 这类列必须 `summarizeBy: none`，否则仪表盘上会被自动求和；分数类用 `summarizeBy: sum`。
-- 关系写在 `relationships.tmdl`：
+- partition 的 M **不能只写一个裸查询名**，要包成完整 `let … in …`：
+
+```tmdl
+	partition 比赛数据 = m
+		mode: import
+		source =
+			let
+			    源 = 比赛宽表
+			in
+			    源
+```
+
+- 关系写在 `relationships.tmdl`（**方向必须是 事实 → 维度**）：
 
 ```tmdl
 relationship <guid>
-	fromColumn: 首发名单.编号
-	toColumn: 比赛数据.编号
+	fromColumn: 事实表.维度键
+
+	toColumn: 维度表.键
+
+relationship <guid>
+	isActive: false
+	fromColumn: 事实表.客队
+	toColumn: 维度表.球队
 ```
+
+⛔ `isActive: false` 写在 `fromColumn` **之前**（官方序列化顺序），并且与上一条之间留空行。
 
 ### report.json（legacy 报表，最小可用）
 
@@ -231,11 +262,12 @@ for p in glob.glob(PROJ + '/**/*', recursive=True):
 
 `github.com/microsoft/json-schemas`：`fabric/pbip/pbipProperties/1.0.0/`、`fabric/item/report/definitionProperties/1.0.0/`、`fabric/item/semanticModel/definitionProperties/1.0.0/`。版本号写错会打不开，用这些 schema 核对。
 
-## 已知限制：离线生成 .pbit/.pbix
+## 离线生成 .pbit / .pbix：走不通
 
-- `pbi-tools compile <PbixProj> <out.pbit> PBIT` 需要 PbixProj 结构（`Version.txt` + `Report/report.json`+`config.json`+`sections/` + `ReportMetadata.json` + `ReportSettings.json` + `Model/`），这些都能手写（骨架留在 `_tools\pbixproj-build\`）。
-- 但打包那一步会调 Desktop 自带的 `Microsoft.PowerBI.Packaging.PowerBIPackager.Save(...)`，**新版 Desktop（26.09 实测）签名已变**，pbi-tools 1.2.0（2025-01，最后一版）抛 `MissingMethodException`。
-- **想要 .pbit 就别走这条路**：唯一可靠方式是让 Desktop 自己导出（文件 → 导出 → Power BI 模板），详见下文「导出 .pbit 的真相」。要单文件 .pbix 则用「文件 → 另存为」。
+- `pbi-tools compile` 打包那步要调 Desktop 的 `Microsoft.PowerBI.Packaging.PowerBIPackager.Save(...)`，**Desktop 26.09 签名已变** → `MissingMethodException`（pbi-tools 停在 2025-01，无解）。
+- 手拼 OPC 包也不行，试过两次都撞墙。
+- **要 `.pbit` 只有一个来源：Desktop 自己导出**（文件 → 导出 → Power BI 模板）→ 完整结构、尸检结论与自动化配方见 `pbit-export.md`。
+- 要单文件 `.pbix` 则用「文件 → 另存为」，或在导出流程里选「Power BI 文件」。
 
 ## 给报告加可视化（PBIR 增强格式）
 
@@ -286,32 +318,50 @@ for p in glob.glob(PROJ + '/**/*', recursive=True):
 正确做法：**只保留 事实→维度 的关系**（共享维度可以同时连多张事实表），事实表之间的业务关联通过共享维度表达。改完 Desktop 一次通过。
 （角色扮演维度：同一张维度表连同一张事实表两次可以，一条 active、一条 `isActive: false`，不构成路径冲突。）
 
-## 导出 .pbit 的真相（2026-10 实测）
+## `.pbit` 导出 → 见 `pbit-export.md`
 
-### PBIT 内部结构（解剖自真实包）
+这里是**过程产物**（PBIP）的文档。最终交付物的全部内容——真实 PBIT 的部件结构（26.09 已无 `DataMashup`，改用 `UnappliedChanges`）、手搓为什么不行、Desktop 导出的自动化能力边界、UI 坐标标定与控件定位、导出后验收、交付话术——**都在 `references/pbit-export.md`**，本文不再重复。
 
-```
-Version          UTF-16LE 的版本号（如 "1.12"/"1.25"，8 字节）
-DataModelSchema  UTF-16LE 的 TMSL JSON —— PBIT 的关键：模型是文本，且 M 代码内联在分区的 source.expression 里
-DataMashup       二进制：8 字节头（4 字节 0 + 4 字节长度）+ zip（Config/Package.xml + [Content_Types].xml + Formulas/Section1.m）
-Report/...       报表部件（legacy 是单个 Report/Layout，UTF-16LE JSON）
-Settings / Metadata / DiagramState / SecurityBindings  小部件
-[Content_Types].xml
-```
-
-`pbi-tools convert <definition文件夹> <输出> Raw` 导出的 `model.bim` **自带内联 M**（`source.expression` 是字符串数组），是造 PBIT/模板的现成料。
-
-### 但这两条路都走不通（别重复踩）
-
-1. **pbi-tools compile → PBIT**：打包那步要调 Desktop 的 `Microsoft.PowerBI.Packaging.PowerBIPackager.Save(...)`，新版 Desktop（26.09 实测）签名已变 → `MissingMethodException`；pbi-tools 最新版停在 2025-01，无解。
-2. **手工构造 PBIT 包**：即使补齐 DataMashup、写上真实 OPC 内容类型、对齐 UTF-16LE 编码，Desktop 26.09 仍报「**无法打开模板：文件可能已加密或已损坏**」（试了 2 版）。现代的 PBIT 包格式比 2018 年样本严格得多，盲造不划算。
-
-### 唯一可靠路径
-
-**用 Desktop 自己导出**：打开项目 → 「文件 → 导出 → Power BI 模板」→ 保存。
-- 不要试图用 ctypes 鼠标/键盘自动化点这个菜单：实测桌面会话前台状态不稳（窗口频繁被最小化、`GetForegroundWindow()` 返回 0），点击会落空甚至点到别的窗口上。
-- 正确姿势：把这一步交给用户（3 次点击），然后**用 MCP `pbix_inspect` + 打开验证**他导出的 pbit。
+一句话版：**别自造，用 Desktop「文件 → 导出 → Power BI 模板」。**
 
 ## 给用户的交付话术模板
 
-> 双击 `<项目名>.pbip` → 打开时会弹参数框（默认值已填好）→ 点确定 → 主页点「刷新」→ 左侧字段面板立刻出现两张表和全部字段。想单文件就「另存为 .pbix」。
+**交付物是 `.pbit`**（过程版的 PBIP 可以一并留着，方便以后改）：
+
+> 双击 `<项目名>-数据清洗模板.pbit` → Power BI Desktop 会用模板新建报表 → 弹参数框时把「数据文件路径」指到原始数据文件 → 确定 → 主页点「刷新」（约 2 万行，1~2 分钟）→ 三页看板就有数据了。想存成可编辑单文件：文件 → 另存为 `.pbix`。
+
+（PBIP 版本也可以留着做开发用：双击 `<项目名>.pbip` 即可，两者内容一致。）
+
+## TMDL 格式死线速查（错一条 `pbi-tools convert` 就抛 `TmdlFormatException`）
+
+上面的示例已经是正确写法，这里是**逐条自查清单**：
+
+| # | 死线 | 错了会怎样 |
+| --- | --- | --- |
+| 1 | `annotation` / `ref table` **顶格**（第 0 列），只有属性行缩进；顶格语句之间留空行 | `Parsing error type - InvalidLineType / Unexpected line type: ReferenceObject!` |
+| 2 | 表达式名**不加引号**：`expression 比赛宽表 =` | —（加 `'…'` 也能读，但没必要） |
+| 3 | `isActive: false` 写在 `fromColumn` **之前** | —（官方序列化顺序） |
+| 4 | 多行 M 体缩进**深于**随后的 `annotation`（M 体 2 tab、annotation 1 tab），两者间留空行 | annotation 被吞进 M 文本 → 语法错 |
+| 5 | partition 的 M 要包成完整 `let … in …`，不能只写裸查询名 | 解析不过 |
+| 6 | `dataType` **没有 `date`**，日期用 `dateTime` + `formatString: Short Date` | — |
+
+**最稳的参照物是本机已跑通的项目**（`WorkBuddy/<示例项目>/PowerBI项目-篮球比赛数据-20260930`）：照抄它的缩进与字段顺序，比查 schema 快得多。
+
+### 生成与校验流程（Python 生成器 + 官方序列化器回灌）
+
+```
+① Python 生成器：列清单作为唯一数据源，同时驱动 M 代码与 TMDL 列定义（82 列手写必错）
+② 全部文件 UTF-8 无 BOM（BOM 会让 Desktop 26.09 直接拒收）
+③ pbi-tools convert "<项目>\<名>.SemanticModel\definition" <临时输出> Tmdl -overwrite
+④ 剥掉输出文件开头的 BOM，再覆盖回项目 → 模型层就是官方序列化器产物
+⑤ 结构自检：JSON 可解析 / byPath 解析得到 .SemanticModel / ref table 与 tables\ 一致 /
+   sourceColumn 无重复 / 关系端点表存在且方向为 事实→维度
+```
+
+- `pbi-tools convert` 的输入必须是 `definition` 文件夹**本身**；退出码 0 且无异常栈 = TMDL 合法。
+- 它会顺手归一化（`isKey: true` → `isKey`、M 体多缩进一级），属正常，M 代码逐字保留。
+- 实测 `annotation PBI_ResultType = Function` 对自定义函数是合法的，会被保留。
+
+## 真机验证与逐页取证 → 见 `powerbi-mcp.md`
+
+Desktop Bridge（热重载 `file.reload/v1`、按 pageId 截图 `report.snapshot.capture/v2`）、AS 端口怎么找（**别用 `netstat`**）、截图三招、本机补丁、脚本清单，**统一放在 `references/powerbi-mcp.md`**，本文不重复。

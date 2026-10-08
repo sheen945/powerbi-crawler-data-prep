@@ -1,0 +1,271 @@
+"""
+Power BI REST API Connector
+For listing workspaces and datasets from Power BI Service
+"""
+import logging
+from typing import Any, Dict, List, Optional
+import requests
+import msal
+
+logger = logging.getLogger(__name__)
+
+
+class PowerBIRestConnector:
+    """Power BI connector using REST API for workspace/dataset listing"""
+
+    BASE_URL = "https://api.powerbi.com/v1.0/myorg"
+    AUTHORITY = "https://login.microsoftonline.com/{tenant_id}"
+    SCOPE = ["https://analysis.windows.net/powerbi/api/.default"]
+
+    def __init__(self, tenant_id: str, client_id: str, client_secret: str):
+        """Initialize connector with Azure AD credentials"""
+        self.tenant_id = tenant_id
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.access_token = None
+
+    def authenticate(self) -> bool:
+        """Authenticate using Service Principal and get access token"""
+        try:
+            authority_url = self.AUTHORITY.format(tenant_id=self.tenant_id)
+            app = msal.ConfidentialClientApplication(
+                self.client_id,
+                authority=authority_url,
+                client_credential=self.client_secret,
+            )
+
+            result = app.acquire_token_for_client(scopes=self.SCOPE)
+
+            if "access_token" in result:
+                self.access_token = result["access_token"]
+                logger.info("Successfully authenticated to Power BI Service")
+                return True
+            else:
+                error = result.get("error_description", "Unknown error")
+                logger.error(f"Authentication failed: {error}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Authentication error: {str(e)}")
+            return False
+
+    def _get_headers(self) -> Dict[str, str]:
+        """Get HTTP headers with authorization"""
+        return {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+
+    def list_workspaces(self) -> List[Dict[str, Any]]:
+        """
+        List all workspaces accessible by the Service Principal
+        """
+        try:
+            if not self.access_token:
+                if not self.authenticate():
+                    return []
+
+            url = f"{self.BASE_URL}/groups"
+            response = requests.get(url, headers=self._get_headers(), timeout=30)
+            response.raise_for_status()
+
+            workspaces = response.json().get("value", [])
+            logger.info(f"Found {len(workspaces)} workspace(s)")
+
+            return [
+                {
+                    "id": ws["id"],
+                    "name": ws["name"],
+                    "type": ws.get("type", "Workspace"),
+                    "state": ws.get("state", "Active"),
+                }
+                for ws in workspaces
+            ]
+
+        except Exception as e:
+            logger.error(f"Failed to list workspaces: {str(e)}")
+            return []
+
+    def list_datasets(self, workspace_id: str) -> List[Dict[str, Any]]:
+        """
+        List all datasets in a workspace
+        """
+        try:
+            if not self.access_token:
+                if not self.authenticate():
+                    return []
+
+            url = f"{self.BASE_URL}/groups/{workspace_id}/datasets"
+            response = requests.get(url, headers=self._get_headers(), timeout=30)
+            response.raise_for_status()
+
+            datasets = response.json().get("value", [])
+            logger.info(f"Found {len(datasets)} dataset(s)")
+
+            return [
+                {
+                    "id": ds["id"],
+                    "name": ds["name"],
+                    "configuredBy": ds.get("configuredBy", "Unknown"),
+                    "isRefreshable": ds.get("isRefreshable", False),
+                }
+                for ds in datasets
+            ]
+
+        except Exception as e:
+            logger.error(f"Failed to list datasets: {str(e)}")
+            return []
+
+    # ==================== REFRESH OPERATIONS ====================
+
+    def resolve_dataset(self, workspace_name: str, dataset_name: str):
+        """Resolve a workspace+dataset name to (workspace_id, dataset_id).
+
+        Returns (workspace_id, dataset_id, None) or (None, None, error_message).
+        """
+        workspaces = self.list_workspaces()
+        ws = next((w for w in workspaces if w["name"] == workspace_name), None)
+        if not ws:
+            return None, None, f"Workspace '{workspace_name}' not found (or no access)"
+        datasets = self.list_datasets(ws["id"])
+        ds = next((d for d in datasets if d["name"] == dataset_name), None)
+        if not ds:
+            return None, None, f"Dataset '{dataset_name}' not found in workspace '{workspace_name}'"
+        return ws["id"], ds["id"], None
+
+    def get_refresh_history(self, workspace_id: str, dataset_id: str, top: int = 20) -> List[Dict[str, Any]]:
+        """Get recent refresh history for a dataset (most recent first).
+
+        Each entry: requestId, refreshType, startTime, endTime, status
+        (Unknown|Completed|Failed|Disabled), serviceExceptionJson (a JSON string on failure).
+        """
+        if not self.access_token and not self.authenticate():
+            return []
+        url = f"{self.BASE_URL}/groups/{workspace_id}/datasets/{dataset_id}/refreshes?$top={int(top)}"
+        response = requests.get(url, headers=self._get_headers(), timeout=30)
+        response.raise_for_status()
+        return response.json().get("value", [])
+
+    def get_datasources(self, workspace_id: str, dataset_id: str) -> List[Dict[str, Any]]:
+        """Get the data sources bound to a dataset (for gateway/source diagnostics)."""
+        if not self.access_token and not self.authenticate():
+            return []
+        url = f"{self.BASE_URL}/groups/{workspace_id}/datasets/{dataset_id}/datasources"
+        response = requests.get(url, headers=self._get_headers(), timeout=30)
+        response.raise_for_status()
+        return response.json().get("value", [])
+
+    def trigger_refresh(self, workspace_id: str, dataset_id: str,
+                        body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Trigger a dataset refresh. With no body, sends a standard refresh
+        ({"notifyOption": "NoNotification"}) that works on Pro. A non-empty body uses the
+        enhanced refresh API (Premium/PPU/Fabric) and must NOT include notifyOption.
+
+        Returns {accepted, status_code, request_id, location, message}.
+        """
+        if not self.access_token and not self.authenticate():
+            return {"accepted": False, "message": "Authentication failed"}
+        url = f"{self.BASE_URL}/groups/{workspace_id}/datasets/{dataset_id}/refreshes"
+        payload = body if body else {"notifyOption": "NoNotification"}
+        try:
+            response = requests.post(url, headers=self._get_headers(), json=payload, timeout=30)
+            accepted = response.status_code in (200, 202)  # async contract is 202 Accepted
+            location = response.headers.get("Location")
+            return {
+                "accepted": accepted,
+                "status_code": response.status_code,
+                "request_id": response.headers.get("x-ms-request-id") or (location.rstrip("/").split("/")[-1] if location else None),
+                "location": location,
+                "message": "Refresh requested" if accepted else (response.text or "")[:500],
+            }
+        except Exception as e:
+            return {"accepted": False, "message": str(e)}
+
+    # ==================== ADMIN / SCANNER / ACTIVITY (Wave 3) ====================
+    # These require Fabric/Power BI admin rights (or an SP in an allowed security group
+    # with read-only admin APIs enabled). Reads only; rate-limited by the service.
+
+    def admin_list_workspaces(self, top: int = 100) -> List[Dict[str, Any]]:
+        """List workspaces tenant-wide (admin). GET /admin/groups."""
+        if not self.access_token and not self.authenticate():
+            return []
+        url = f"{self.BASE_URL}/admin/groups?$top={int(top)}"
+        response = requests.get(url, headers=self._get_headers(), timeout=30)
+        response.raise_for_status()
+        return response.json().get("value", [])
+
+    def admin_post_workspace_info(self, workspace_ids: List[str], lineage: bool = True) -> Dict[str, Any]:
+        """Start a metadata scan for up to 100 workspaces. POST /admin/workspaces/getInfo.
+        Returns {id: scanId, status,...}."""
+        if not self.access_token and not self.authenticate():
+            return {}
+        # datasourceDetails=false: governance summary uses roles/labels/lineage only, not
+        # datasource instances - keeps the scan payload small. lineage gives report->dataset links.
+        url = (f"{self.BASE_URL}/admin/workspaces/getInfo"
+               f"?lineage={'true' if lineage else 'false'}&datasourceDetails=false"
+               f"&datasetSchema=false&datasetExpressions=false&getArtifactUsers=false")
+        response = requests.post(url, headers=self._get_headers(),
+                                 json={"workspaces": workspace_ids[:100]}, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+    def admin_get_scan_status(self, scan_id: str) -> Dict[str, Any]:
+        """GET /admin/workspaces/scanStatus/{scanId}. status is a string (not a closed enum);
+        known values include NotStarted, Running, Succeeded, Failed - match case-insensitively
+        and treat anything else as still in progress. On Failed, inspect the .error object."""
+        if not self.access_token and not self.authenticate():
+            return {}
+        url = f"{self.BASE_URL}/admin/workspaces/scanStatus/{scan_id}"
+        response = requests.get(url, headers=self._get_headers(), timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+    def admin_get_scan_result(self, scan_id: str) -> Dict[str, Any]:
+        """GET /admin/workspaces/scanResult/{scanId}. Returns the full workspace metadata graph."""
+        if not self.access_token and not self.authenticate():
+            return {}
+        url = f"{self.BASE_URL}/admin/workspaces/scanResult/{scan_id}"
+        response = requests.get(url, headers=self._get_headers(), timeout=60)
+        response.raise_for_status()
+        return response.json()
+
+    def admin_get_activity_events(self, start_dt_iso: str, end_dt_iso: str,
+                                  filter_expr: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get audit Activity Events for a window (same UTC day, <=28 days old) via
+        GET /admin/activityevents. Datetimes are single-quoted UTC ISO. Pages by following
+        continuationUri verbatim while continuationToken is non-null (a page may be empty but
+        still have a token). Honors 429 Retry-After. Returns the accumulated entities."""
+        import time as _time
+        from urllib.parse import quote
+        if not self.access_token and not self.authenticate():
+            return []
+        url = (f"{self.BASE_URL}/admin/activityevents"
+               f"?startDateTime='{start_dt_iso}'&endDateTime='{end_dt_iso}'")
+        if filter_expr:
+            url += f"&$filter={quote(filter_expr)}"
+        entities: List[Dict[str, Any]] = []
+        for _ in range(1000):  # safety bound on pages
+            response = requests.get(url, headers=self._get_headers(), timeout=30)
+            if response.status_code == 429:
+                _time.sleep(int(response.headers.get("Retry-After", "10")))
+                continue
+            response.raise_for_status()
+            data = response.json()
+            entities.extend(data.get("activityEventEntities", []) or [])
+            token = data.get("continuationToken")
+            cont_uri = data.get("continuationUri")
+            if not token:
+                break
+            url = cont_uri  # complete, correctly-encoded URL - follow verbatim, no re-encoding
+        return entities
+
+    def admin_get_activity_events_for_day(self, date: str,
+                                          filter_expr: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Pull a full UTC day of activity events by looping 24 one-hour windows
+        (the raw API allows at most ~1 hour per request). date = 'YYYY-MM-DD'."""
+        events: List[Dict[str, Any]] = []
+        for h in range(24):
+            start = f"{date}T{h:02d}:00:00.000Z"
+            end = f"{date}T{h:02d}:59:59.999Z"
+            events.extend(self.admin_get_activity_events(start, end, filter_expr))
+        return events

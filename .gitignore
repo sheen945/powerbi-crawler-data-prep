@@ -22,3 +22,8 @@ logs/
 build/
 dist/
 output/
+
+# Power BI 本地文件（体积大，不入库）
+*.pbix
+*.pbit
+*.pbip
